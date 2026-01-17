@@ -716,8 +716,14 @@ handshake_waitdns(int dns_fd, char *buf, int buflen, char c1, char c2, int timeo
 		   for the same topdomain. When this happens, waiting a while
 		   is the only option that works.
 		 */
-		if (rv < 0 && q.rcode == SERVFAIL)
-			sleep(1);
+		if (rv < 0 && q.rcode == SERVFAIL) {
+			/* Wait longer on SERVFAIL to let DNS relay recover */
+			sleep(2);
+			/* Don't print SERVFAIL immediately - it's often transient.
+			   The calling function will retry, and only print error
+			   if all retries fail. */
+			return -2;
+		}
 
 		if (rv < 0) {
 			write_dns_error(&q, 1);
@@ -1335,7 +1341,8 @@ handshake_version(int dns_fd, int *seed)
 	int i;
 	int read;
 
-	for (i = 0; running && i < 5; i++) {
+	/* Increase retries to handle transient SERVFAIL errors */
+	for (i = 0; running && i < 10; i++) {
 
 		send_version(dns_fd, PROTOCOL_VERSION);
 
@@ -1367,9 +1374,11 @@ handshake_version(int dns_fd, int *seed)
 		} else if (read > 0)
 			warnx("did not receive proper login challenge");
 
-		fprintf(stderr, "Retrying version check...\n");
+		if (read < 0 && i < 9)
+			fprintf(stderr, "Retrying version check...\n");
 	}
 	warnx("couldn't connect to server (maybe other -T options will work)");
+	warnx("If you see SERVFAIL errors, try using a different DNS server or query type");
 	return 1;
 }
 
@@ -1386,7 +1395,8 @@ handshake_login(int dns_fd, int seed)
 
 	login_calculate(login, 16, password, seed);
 
-	for (i = 0; running && i < 5; i++) {
+	/* Increase retries to handle transient SERVFAIL errors */
+	for (i = 0; running && i < 10; i++) {
 
 		send_login(dns_fd, login, 16);
 
@@ -1418,9 +1428,11 @@ handshake_login(int dns_fd, int seed)
 			}
 		}
 
-		fprintf(stderr, "Retrying login...\n");
+		if (read < 0 && i < 9)
+			fprintf(stderr, "Retrying login...\n");
 	}
 	warnx("couldn't login to server");
+	warnx("If you see SERVFAIL errors, try using a different DNS server or query type");
 	return 1;
 }
 
