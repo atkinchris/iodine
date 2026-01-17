@@ -869,34 +869,58 @@ handle_null_request(int tun_fd, int dns_fd, struct dnsfd *dns_fds, struct query 
 		/* Login phase, handle auth */
 		userid = unpacked[0];
 
-		if (check_user_and_ip(userid, q) != 0) {
+		/* Check basic user validity first */
+		if (userid < 0 || userid >= created_users) {
 			write_dns(dns_fd, q, "BADIP", 5, 'T');
-			syslog(LOG_WARNING, "dropped login request from user #%d from unexpected source %s",
-				userid, format_addr(&q->from, q->fromlen));
 			return;
+		}
+		if (!users[userid].active || users[userid].disabled) {
+			write_dns(dns_fd, q, "BADIP", 5, 'T');
+			return;
+		}
+		if (users[userid].last_pkt + 60 < time(NULL)) {
+			write_dns(dns_fd, q, "BADIP", 5, 'T');
+			return;
+		}
+
+		users[userid].last_pkt = time(NULL);
+		login_calculate(logindata, 16, password, users[userid].seed);
+
+		/* Check password first */
+		if (read >= 18 && (memcmp(logindata, unpacked+1, 16) == 0)) {
+			/* Password is correct - update IP address if it changed */
+			if (check_ip && check_user_and_ip(userid, q) != 0) {
+				/* IP address changed, but password is correct - update stored IP */
+				memcpy(&(users[userid].host), &(q->from), q->fromlen);
+				users[userid].hostlen = q->fromlen;
+				syslog(LOG_INFO, "user #%d IP address changed to %s during login",
+					userid, format_addr(&q->from, q->fromlen));
+			}
+
+			/* Store login ok */
+			users[userid].authenticated = 1;
+
+			/* Send ip/mtu/netmask info */
+			tempip.s_addr = my_ip;
+			tmp[0] = strdup(inet_ntoa(tempip));
+			tempip.s_addr = users[userid].tun_ip;
+			tmp[1] = strdup(inet_ntoa(tempip));
+
+			read = snprintf(out, sizeof(out), "%s-%s-%d-%d",
+					tmp[0], tmp[1], my_mtu, netmask);
+
+			write_dns(dns_fd, q, out, read, users[userid].downenc);
+			q->id = 0;
+			syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, tmp[1]);
+
+			free(tmp[1]);
+			free(tmp[0]);
 		} else {
-			users[userid].last_pkt = time(NULL);
-			login_calculate(logindata, 16, password, users[userid].seed);
-
-			if (read >= 18 && (memcmp(logindata, unpacked+1, 16) == 0)) {
-				/* Store login ok */
-				users[userid].authenticated = 1;
-
-				/* Send ip/mtu/netmask info */
-				tempip.s_addr = my_ip;
-				tmp[0] = strdup(inet_ntoa(tempip));
-				tempip.s_addr = users[userid].tun_ip;
-				tmp[1] = strdup(inet_ntoa(tempip));
-
-				read = snprintf(out, sizeof(out), "%s-%s-%d-%d",
-						tmp[0], tmp[1], my_mtu, netmask);
-
-				write_dns(dns_fd, q, out, read, users[userid].downenc);
-				q->id = 0;
-				syslog(LOG_NOTICE, "accepted password from user #%d, given IP %s", userid, tmp[1]);
-
-				free(tmp[1]);
-				free(tmp[0]);
+			/* Password is wrong - check IP to provide appropriate error message */
+			if (check_ip && check_user_and_ip(userid, q) != 0) {
+				write_dns(dns_fd, q, "BADIP", 5, 'T');
+				syslog(LOG_WARNING, "dropped login request from user #%d from unexpected source %s",
+					userid, format_addr(&q->from, q->fromlen));
 			} else {
 				write_dns(dns_fd, q, "LNAK", 4, 'T');
 				syslog(LOG_WARNING, "rejected login request from user #%d from %s, bad password",
